@@ -1,7 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import './App.css';
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+import { Button, ErrorAlert, StatusBadge } from './components/ui';
+import { DashboardPage } from './pages/DashboardPage';
+import { JdMatchPage } from './pages/JdMatchPage';
+import { MockInterviewPage } from './pages/MockInterviewPage';
+import { ResumeAnalysisPage } from './pages/ResumeAnalysisPage';
+import { apiService } from './services/api';
 
 const initialState = {
   resumeId: '',
@@ -19,250 +23,197 @@ const initialState = {
   dashboard: null,
 };
 
-async function api(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.detail || data.message || 'Request failed');
-  }
-  return data;
-}
-
-function Section({ title, children }) {
-  return (
-    <section className="card">
-      <h2>{title}</h2>
-      {children}
-    </section>
-  );
-}
-
-function ResultBox({ data }) {
-  if (!data) return null;
-  return <pre>{JSON.stringify(data, null, 2)}</pre>;
-}
+const pages = [
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'analysis', label: 'Resume Analysis' },
+  { id: 'match', label: 'JD Match' },
+  { id: 'interview', label: 'Mock Interview' },
+];
 
 export default function App() {
   const [state, setState] = useState(initialState);
   const [uploadFile, setUploadFile] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [activePage, setActivePage] = useState('dashboard');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [aiStatus, setAiStatus] = useState({ status: 'Checking', mode: '-' });
+  const [loadingBy, setLoadingBy] = useState({});
+  const [errorBy, setErrorBy] = useState({});
+  const [globalError, setGlobalError] = useState('');
 
-  const skillRows = useMemo(() => state.match?.match_table || [], [state.match]);
+  useEffect(() => {
+    const fetchHealth = async () => {
+      try {
+        const health = await apiService.health();
+        setAiStatus({ status: health.status || 'ok', mode: health.mode || 'mock' });
+      } catch {
+        setAiStatus({ status: 'offline', mode: 'unknown' });
+      }
+    };
 
-  const run = async (fn) => {
-    setLoading(true);
-    setError('');
+    fetchHealth();
+  }, []);
+
+  const run = async (action, fn) => {
+    setLoadingBy((prev) => ({ ...prev, [action]: true }));
+    setErrorBy((prev) => ({ ...prev, [action]: '' }));
+    setGlobalError('');
     try {
       await fn();
-    } catch (err) {
-      setError(err.message || 'Something went wrong');
+    } catch (error) {
+      const message = error.message || 'Something went wrong. Please try again.';
+      setErrorBy((prev) => ({ ...prev, [action]: message }));
+      setGlobalError(message);
     } finally {
-      setLoading(false);
+      setLoadingBy((prev) => ({ ...prev, [action]: false }));
     }
   };
 
-  const uploadResume = async () => {
-    if (!uploadFile) throw new Error('Please select a PDF file first.');
-
-    const formData = new FormData();
-    formData.append('file', uploadFile);
-
-    const result = await api('/api/resumes/upload', {
-      method: 'POST',
-      body: formData,
-    });
-
-    setState((prev) => ({
-      ...prev,
-      resumeId: String(result.resume_id),
-      dashboardId: String(result.resume_id),
-      analyze: result,
-    }));
-  };
-
-  const runAnalyze = async () => {
-    const result = await api('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resume_id: Number(state.resumeId) }),
-    });
-    setState((prev) => ({ ...prev, analyze: result }));
-  };
-
-  const runMatch = async () => {
-    const result = await api('/api/match', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resume_id: Number(state.resumeId), jd_content: state.jd }),
-    });
-    setState((prev) => ({ ...prev, match: result }));
-  };
-
-  const runAts = async () => {
-    const result = await api('/api/ats-score', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resume_id: Number(state.resumeId), jd_content: state.jd }),
-    });
-    setState((prev) => ({ ...prev, ats: result }));
-  };
-
-  const runSuggestions = async () => {
-    const result = await api('/api/suggestions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resume_id: Number(state.resumeId), jd_content: state.jd }),
-    });
-    setState((prev) => ({ ...prev, suggestions: result }));
-  };
-
-  const runQuestions = async () => {
-    const result = await api('/api/interview/questions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resume_id: Number(state.resumeId), jd_content: state.jd, num_questions_per_category: 3 }),
-    });
-
-    const firstQuestion = result.questions?.technical?.[0] || '';
-    setState((prev) => ({
-      ...prev,
-      questions: result,
-      interviewSessionId: String(result.session_id),
-      interviewQuestion: firstQuestion,
-    }));
-  };
-
-  const runEvaluation = async () => {
-    const result = await api('/api/interview/evaluate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: Number(state.interviewSessionId),
+  const handlers = useMemo(() => ({
+    upload: () => run('upload', async () => {
+      if (!uploadFile) {
+        throw new Error('Please choose a PDF resume to upload.');
+      }
+      const result = await apiService.uploadResume(uploadFile);
+      setState((prev) => ({
+        ...prev,
+        resumeId: String(result.resume_id),
+        dashboardId: String(result.resume_id),
+        analyze: result,
+      }));
+    }),
+    analyze: () => run('analyze', async () => {
+      const result = await apiService.analyzeResume(state.resumeId);
+      setState((prev) => ({ ...prev, analyze: result }));
+    }),
+    match: () => run('match', async () => {
+      const result = await apiService.matchResume(state.resumeId, state.jd);
+      setState((prev) => ({ ...prev, match: result }));
+    }),
+    ats: () => run('ats', async () => {
+      const result = await apiService.atsScore(state.resumeId, state.jd);
+      setState((prev) => ({ ...prev, ats: result }));
+    }),
+    suggestions: () => run('suggestions', async () => {
+      const result = await apiService.suggestions(state.resumeId, state.jd);
+      setState((prev) => ({ ...prev, suggestions: result }));
+    }),
+    questions: () => run('questions', async () => {
+      const result = await apiService.interviewQuestions(state.resumeId, state.jd);
+      const firstQuestion = result.questions?.technical?.[0] || '';
+      setState((prev) => ({
+        ...prev,
+        questions: result,
+        interviewSessionId: String(result.session_id),
+        interviewQuestion: firstQuestion,
+      }));
+    }),
+    evaluate: () => run('evaluation', async () => {
+      const result = await apiService.evaluateAnswer({
+        sessionId: state.interviewSessionId,
         question: state.interviewQuestion,
         answer: state.interviewAnswer,
-      }),
-    });
-    setState((prev) => ({ ...prev, evaluation: result }));
-  };
+      });
+      setState((prev) => ({ ...prev, evaluation: result }));
+    }),
+    dashboard: () => run('dashboard', async () => {
+      const result = await apiService.dashboard(state.dashboardId);
+      setState((prev) => ({ ...prev, dashboard: result }));
+    }),
+  }), [state, uploadFile]);
 
-  const runDashboard = async () => {
-    const result = await api(`/api/dashboard/${Number(state.dashboardId)}`);
-    setState((prev) => ({ ...prev, dashboard: result }));
+  const sharedProps = {
+    state,
+    onResumeIdChange: (resumeId) => setState((prev) => ({ ...prev, resumeId })),
+    onJdChange: (jd) => setState((prev) => ({ ...prev, jd })),
+    loadingBy,
+    errorBy,
   };
 
   return (
-    <div className="app">
-      <header>
-        <h1>AI-Powered Resume Analyzer + Mock Interview Platform</h1>
-        <p>Demo mode works without Gemini key. ATS score is AI-generated and approximate.</p>
-      </header>
-
-      {error ? <div className="error">{error}</div> : null}
-      {loading ? <div className="loading">Processing...</div> : null}
-
-      <Section title="1) Resume Upload">
-        <input type="file" accept="application/pdf" onChange={(e) => setUploadFile(e.target.files?.[0] || null)} />
-        <button onClick={() => run(uploadResume)} disabled={loading}>Upload PDF</button>
-        <p>Resume ID: {state.resumeId || '-'}</p>
-        <ResultBox data={state.analyze?.parsed ? state.analyze : null} />
-      </Section>
-
-      <Section title="2) Analysis + JD Matching">
-        <label htmlFor="resumeId">Resume ID</label>
-        <input
-          id="resumeId"
-          value={state.resumeId}
-          onChange={(e) => setState((prev) => ({ ...prev, resumeId: e.target.value }))}
-          placeholder="e.g. 1"
-        />
-
-        <label htmlFor="jd">Job Description</label>
-        <textarea
-          id="jd"
-          rows={6}
-          value={state.jd}
-          onChange={(e) => setState((prev) => ({ ...prev, jd: e.target.value }))}
-          placeholder="Paste JD text here"
-        />
-
-        <div className="actions">
-          <button onClick={() => run(runAnalyze)} disabled={loading}>Analyze Resume</button>
-          <button onClick={() => run(runMatch)} disabled={loading}>Match JD</button>
-          <button onClick={() => run(runAts)} disabled={loading}>Generate ATS Score</button>
-          <button onClick={() => run(runSuggestions)} disabled={loading}>Suggestions</button>
+    <div className="app-shell">
+      <header className="top-nav">
+        <div className="brand-block">
+          <h1>AI Resume Analyzer</h1>
+          <p>Backend API contracts preserved. Frontend redesigned for production-ready usability.</p>
         </div>
 
-        {skillRows.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>Requirement</th>
-                <th>Resume</th>
-              </tr>
-            </thead>
-            <tbody>
-              {skillRows.map((row) => (
-                <tr key={row.requirement}>
-                  <td>{row.requirement}</td>
-                  <td>{row.status === 'Found' ? '✅ Found' : '❌ Missing'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        <button
+          className="menu-toggle"
+          type="button"
+          onClick={() => setMenuOpen((prev) => !prev)}
+          aria-expanded={menuOpen}
+          aria-controls="primary-nav"
+        >
+          Menu
+        </button>
 
-        <ResultBox data={state.analyze?.analysis || state.analyze?.parsed ? state.analyze : null} />
-        <ResultBox data={state.ats} />
-        <ResultBox data={state.suggestions} />
-      </Section>
+        <nav id="primary-nav" className={`route-nav ${menuOpen ? 'open' : ''}`} aria-label="Primary">
+          {pages.map((page) => (
+            <Button
+              key={page.id}
+              variant={activePage === page.id ? 'primary' : 'ghost'}
+              onClick={() => {
+                setActivePage(page.id);
+                setMenuOpen(false);
+              }}
+            >
+              {page.label}
+            </Button>
+          ))}
+        </nav>
 
-      <Section title="3) Mock Interview">
-        <button onClick={() => run(runQuestions)} disabled={loading}>Generate Questions</button>
-        <p>Session ID: {state.interviewSessionId || '-'}</p>
+        <div className="ai-status" aria-live="polite">
+          <span>AI Status</span>
+          <StatusBadge status={aiStatus.status === 'ok' ? 'success' : 'warning'}>
+            {aiStatus.status}
+          </StatusBadge>
+          <small>Mode: {aiStatus.mode}</small>
+        </div>
+      </header>
 
-        <label htmlFor="question">Question</label>
-        <textarea
-          id="question"
-          rows={3}
-          value={state.interviewQuestion}
-          onChange={(e) => setState((prev) => ({ ...prev, interviewQuestion: e.target.value }))}
-        />
+      <main className="page-body">
+        <ErrorAlert message={globalError} />
 
-        <label htmlFor="answer">Your Answer</label>
-        <textarea
-          id="answer"
-          rows={4}
-          value={state.interviewAnswer}
-          onChange={(e) => setState((prev) => ({ ...prev, interviewAnswer: e.target.value }))}
-          placeholder="Type your answer"
-        />
-
-        <button onClick={() => run(runEvaluation)} disabled={loading}>Evaluate Answer</button>
-
-        <ResultBox data={state.questions} />
-        <ResultBox data={state.evaluation} />
-      </Section>
-
-      <Section title="4) Dashboard / History">
-        <label htmlFor="dashboardId">Resume ID or Session ID</label>
-        <input
-          id="dashboardId"
-          value={state.dashboardId}
-          onChange={(e) => setState((prev) => ({ ...prev, dashboardId: e.target.value }))}
-        />
-        <button onClick={() => run(runDashboard)} disabled={loading}>Load Dashboard</button>
-
-        {state.dashboard?.summary ? (
-          <div className="summary-grid">
-            <div><strong>ATS Compatibility:</strong> {state.dashboard.summary.ats_compatibility ?? '-'}</div>
-            <div><strong>Skill Match %:</strong> {state.dashboard.summary.skill_match ?? '-'}</div>
-            <div><strong>Avg Interview Score:</strong> {state.dashboard.summary.avg_interview_score ?? '-'}</div>
-          </div>
+        {activePage === 'dashboard' ? (
+          <DashboardPage
+            state={state}
+            onDashboardIdChange={(dashboardId) => setState((prev) => ({ ...prev, dashboardId }))}
+            onLoadDashboard={handlers.dashboard}
+            onNavigate={setActivePage}
+            loadingBy={loadingBy}
+            errorBy={errorBy}
+          />
         ) : null}
 
-        <ResultBox data={state.dashboard} />
-      </Section>
+        {activePage === 'analysis' ? (
+          <ResumeAnalysisPage
+            {...sharedProps}
+            uploadFile={uploadFile}
+            setUploadFile={setUploadFile}
+            onUpload={handlers.upload}
+            onAnalyze={handlers.analyze}
+          />
+        ) : null}
+
+        {activePage === 'match' ? (
+          <JdMatchPage
+            {...sharedProps}
+            onMatch={handlers.match}
+            onAts={handlers.ats}
+            onSuggestions={handlers.suggestions}
+          />
+        ) : null}
+
+        {activePage === 'interview' ? (
+          <MockInterviewPage
+            {...sharedProps}
+            onGenerateQuestions={handlers.questions}
+            onQuestionChange={(interviewQuestion) => setState((prev) => ({ ...prev, interviewQuestion }))}
+            onAnswerChange={(interviewAnswer) => setState((prev) => ({ ...prev, interviewAnswer }))}
+            onEvaluate={handlers.evaluate}
+          />
+        ) : null}
+      </main>
     </div>
   );
 }
